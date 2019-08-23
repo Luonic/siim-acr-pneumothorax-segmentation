@@ -12,7 +12,6 @@ def mask2rle(img, width, height):
     for y in range(height):
         for x in range(width):
             currentColor = img[x][y]
-
             if currentColor != lastColor:
                 if currentColor == 255:
                     runStart = currentPixel

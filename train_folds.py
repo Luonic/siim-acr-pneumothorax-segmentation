@@ -12,6 +12,7 @@ import utils
 import validate
 from train import train_one_epoch
 import samplers
+import radam
 
 
 def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sampler, epoch, epochs_to_train):
@@ -23,7 +24,9 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
 
     # model = models.UNet(6, 1)
     # model = models.MyResNetModel()
-    model = models.ResNetUNet(n_classes=1)
+    model = models.ResNetUNet(n_classes=1, upsample=True)
+    # model = models.ResNetUNetPlusPlus(n_classes=1)
+    # model = models.EfficientUNet(n_classes=1)
 
     # model = models.HRNetWithClassifier()
 
@@ -56,7 +59,7 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
 
     trainable_params = [param for param in model.parameters() if param.requires_grad]
 
-    lr_scaling_coefficient = (1 / 16) * data_patallel_multiplier * batch_size / 10 #/ 2 # / 10
+    lr_scaling_coefficient = (1 / 16) * data_patallel_multiplier * batch_size / 10
     # max_lr = 2e-3 * lr_scaling_coefficient
     # base_lr = 5e-5 * lr_scaling_coefficient
 
@@ -68,7 +71,9 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
     # optim = torch.optim.Adam(params=[
     #     {"params": backbone_parameters, "lr": base_lr},
     #     {"params": head_and_classifier_params, "lr": max_lr}], lr=base_lr)
-    optim = torch.optim.Adam(params=trainable_params, lr=max_lr)
+    # optim = torch.optim.Adam(params=trainable_params, lr=max_lr)
+    # optim = torch.optim.AdamW(params=trainable_params, lr=base_lr, weight_decay=0.00001)
+    optim = radam.RAdam(params=trainable_params, lr=base_lr, weight_decay=0.0001)
     # optim = torch.optim.SGD(params=trainable_params,
     #                         momentum=0.98,
     #                         nesterov=True,
@@ -88,9 +93,9 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
     # better results than setting stepsize = 2 ∗ epoch. (https://arxiv.org/pdf/1506.01186.pdf)
     # cycle_len = 4 == stepsize = 2
     # in my implementation
-    epochs_per_cycle = 5
+    epochs_per_cycle = 20
     lr_scheduler = lr_utils.CyclicalLR(max_lr=max_lr, base_lr=base_lr, steps_per_epoch=len(train_dataloader),
-                                       epochs_per_cycle=epochs_per_cycle, mode='triangular')
+                                       epochs_per_cycle=epochs_per_cycle, mode='cosine')
     lr_scheduler.step_value = epoch * len(train_dataloader)
 
     steps_per_epoch = len(train_dataloader)
@@ -115,10 +120,6 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
         writer.add_scalar('classification_accuracy', class_score, global_step=global_step)
         writer.add_scalar('mean_epoch_loss', train_result_dict['loss'], global_step=global_step)
         writer.add_scalar('epoch', epoch, global_step=global_step)
-        if mask_score > best_metric:
-            best_metric = mask_score
-            # if epoch % epochs_per_cycle == 0:
-        utils.save_checkpoint(output_dir=work_dir, epoch=epoch, model=model, optimizer=optim, best_metric=best_metric)
 
         # {'best_mask_score': best_mask_score, 'mean_mask_scores': mean_mask_scores,
         #  'best_class_score': best_class_score, 'mean_class_scores': mean_class_scores}
@@ -126,8 +127,14 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
                     'mask_threshold': val_result_dict['best_mask_score'][0],
                     'class_accuracy': val_result_dict['best_class_score'][1],
                     'class_thresold': val_result_dict['best_class_score'][0]}
-        fold_logger.log_epoch(epoch, log_data)
         epoch += 1
+
+    # if mask_score > best_metric:
+    #     best_metric = mask_score
+        # if epoch % epochs_per_cycle == 0:
+    fold_logger.log_epoch(epoch - 1, log_data)
+    utils.save_checkpoint(output_dir=work_dir, epoch=epoch, model=model, optimizer=optim, best_metric=best_metric)
+
     return {'mask_score': mask_score,
             'class_score': class_score,
             'global_step': global_step,
@@ -135,11 +142,11 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
 
 
 if __name__ == '__main__':
+    utils.seed_everything(1)
     utils.set_cudnn_perf_param()
     # TODO: Train on 768x768 random crops of 1024x1024 to be able to capture pneumo features for classification
     # TODO: Finetune decoder for pretrained model a few epochs
-    utils.seed_everything(1)
-    output_dir = 'logs/65-Folds-Adam-b4-CustomUResNet34-BN-MaskOHEMBCEDice-ClassOHEMBCE-FullData-Res1024-Aug'
+    output_dir = 'logs/boundary_loss_test'
     os.makedirs(output_dir, exist_ok=True)
     folds = kfold.KFold('data/folds.json')
     writer = SummaryWriter(output_dir)

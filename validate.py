@@ -59,6 +59,8 @@ def validate(model, dataloader, device, show=False):
                 gt = torch.cat([target_mask, zeros, zeros], dim=1)
                 images = images * (1. - gt) + mask + gt
                 print(torch.mean(pred_mask), torch.max(pred_mask))
+                print('pred_class', pred_class)
+
                 cv2.imshow('scan with mask', np.transpose(images[0].cpu().detach().numpy(), axes=(1, 2, 0)))
                 cv2.waitKey(0)
 
@@ -105,12 +107,12 @@ if __name__ == '__main__':
     import kfold
     folds = kfold.KFold('data/folds.json')
     train_filenames, test_filenames = folds.get_fold_split(0)
-    val_dataset = datareader.SIIMDataset('data/dicom-images-train', 'data/train-rle.csv', ([512], [512]),
+    val_dataset = datareader.SIIMDataset('data/dicom-images-train', 'data/train-rle.csv', ([1024], [1024]),
                                            filenames_whitelist=test_filenames)
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=os.cpu_count())
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1)
 
-    model = models.ResNetUNet(n_classes=1)
+    model = models.ResNetUNet(n_classes=1, upsample=True)
     # model = models.HRNetWithClassifier()
-    utils.try_load_checkpoint('logs/64-Folds-Adam-b16-CustomUResNet34-BN-MaskLovaszBatch-ClassOHEMBCE-FullData-512x512-Aug/fold_0', model,
+    utils.try_load_checkpoint('logs/RAdam-b16-Intepolation-Dice/fold_0', model,
                               device='cpu', load_optimizer=False)
     print(validate(model, val_dataloader, 'cpu', show=True)['best_mask_score'])

@@ -73,7 +73,8 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler=N
         loss_class = loss_dict['class_ce']
         # loss = loss_mask + loss_class
         # loss = loss_dict['mask_ce']
-        loss = loss_dict['mask_ce'] + loss_dict['class_ce']  + loss_dict['mask_dice']
+        loss = loss_dict['total']
+        # loss = loss_dict['class_ce']
 
         if isinstance(data_loader.batch_sampler, samplers.OnlineHardBatchSampler):
             batch_indieces = inputs['idx'].cpu().detach().numpy()
@@ -135,6 +136,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler=N
             global_step = i + epoch * len(data_loader)
             summary_writer.add_scalar('loss_mask', torch.mean(loss_mask).item(), global_step=global_step)
             summary_writer.add_scalar('loss_mask_dice', torch.mean(loss_mask_dice).item(), global_step=global_step)
+            summary_writer.add_scalar('loss_mask_boundary', torch.mean(loss_dict['mask_boundary']).item(), global_step=global_step)
             summary_writer.add_scalar('loss_class', torch.mean(loss_class).item(), global_step=global_step)
             summary_writer.add_scalar('loss', torch.mean(loss).item(), global_step=global_step)
             summary_writer.add_scalar('lr', lr, global_step=global_step)

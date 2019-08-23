@@ -28,7 +28,7 @@ class CyclicalLR():
         self.step_value = 0
 
         if mode == 'cosine':
-            self.lr_mult_fn = lambda: math.cos(abs(self.step_value - 1) % self.steps_per_cycle / self.steps_per_cycle)
+            self.lr_mult_fn = lambda: (math.cos(abs(self.step_value - 1) % self.steps_per_cycle / self.steps_per_cycle * math.pi) + 1) / 2
         elif mode == 'triangular':
             self.lr_mult_fn = lambda: 1. - abs(
                 ((self.step_value % self.steps_per_cycle / self.steps_per_cycle) - 0.5) * 2)
@@ -373,3 +373,18 @@ class StateCacher(object):
         for k in self.cached:
             if os.path.exists(self.cached[k]):
                 os.remove(self.cached[k])
+
+
+
+if __name__ == '__main__':
+    lr_scheduler = CyclicalLR(base_lr=0.0001, max_lr=0.1, steps_per_epoch=100, epochs_per_cycle=1, mode='cosine')
+
+    steps_per_cycle = 100
+    step = 0
+    while True:
+        print(lr_scheduler.lr_mult_fn())
+        lr_scheduler.step()
+
+        # print((math.cos(abs(step - 1) % steps_per_cycle / steps_per_cycle * math.pi) + 1) / 2)
+        # step += 1
+

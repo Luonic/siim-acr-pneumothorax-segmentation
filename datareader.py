@@ -9,10 +9,12 @@ import pandas as pd
 import pydicom as pdc
 import torch
 import torch.nn.functional as F
+import multiprocessing
 from PIL import Image
 from albumentations import (
     Compose, HorizontalFlip, RandomBrightnessContrast, RandomGamma, OneOf,
-    GridDistortion, OpticalDistortion, RandomSizedCrop, ShiftScaleRotate
+    GridDistortion, OpticalDistortion, RandomSizedCrop, ShiftScaleRotate, CLAHE,
+    MedianBlur, MotionBlur, Blur, IAASharpen, ElasticTransform
 )
 from torchvision import transforms
 from tqdm import tqdm
@@ -21,10 +23,14 @@ from mask_functions import rle2mask
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
+# multiprocessing.set_start_method('spawn', force=True)
 
 
 class SIIMDataset(torch.utils.data.Dataset):
-    def __init__(self, image_dir, mask_csv_path, hw_size, augment: object = False, filenames_whitelist: object = None) -> object:
+    def age_converter(self, age):
+        return float(age) / 100
+
+    def __init__(self, image_dir, mask_csv_path, hw_size, augment=False, filenames_whitelist=None):
         self.image_dir = image_dir
         self.height = hw_size[0]
         self.width = hw_size[1]
@@ -37,7 +43,7 @@ class SIIMDataset(torch.utils.data.Dataset):
             OneOf([
                 RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
                 RandomGamma(),
-            ], p=0.3),
+            ], p=0.3), # 0.3
             OneOf([
                 # ElasticTransform(alpha=max(self.height), sigma=max(self.height) * 0.05, alpha_affine=max(self.height) * 0.03),
                 GridDistortion(),
@@ -53,12 +59,59 @@ class SIIMDataset(torch.utils.data.Dataset):
                              p=0.5),
         ], p=1)
 
+        self.augmentations_medium = Compose([
+            HorizontalFlip(p=0.5),
+            OneOf([
+                RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
+                RandomGamma(),
+            ], p=0.9),  # 0.3
+            OneOf([
+                ElasticTransform(alpha=max(self.height), sigma=max(self.height) * 0.05, alpha_affine=max(self.height) * 0.03),
+                GridDistortion(),
+            ], p=0.9),
+            ShiftScaleRotate(shift_limit=float(self.default_height / 6 / self.default_height),
+                             scale_limit=0.15,
+                             rotate_limit=10,
+                             interpolation=cv2.INTER_LINEAR,
+                             border_mode=cv2.BORDER_CONSTANT,
+                             value=0.,
+                             always_apply=False,
+                             p=0.5),
+        ], p=1)
+
+        self.augmentations_hard = Compose([
+            HorizontalFlip(p=0.5),
+            OneOf([
+                RandomBrightnessContrast(brightness_limit=0.0, contrast_limit=0.5),
+                RandomGamma(gamma_limit=(60, 140)),
+            ], p=1.0),  # 0.3
+            # OneOf([
+            #     CLAHE(tile_grid_size=(8, 8)),
+            #     CLAHE(tile_grid_size=(1, 1)),
+            #     MedianBlur(blur_limit=1024 // 128),
+            #     Blur(blur_limit=1024 // 128),
+            #     IAASharpen()
+            # ], p=1.0),
+            OneOf([
+                ElasticTransform(alpha=max(self.height), sigma=max(self.height) * 0.05, alpha_affine=max(self.height) * 0.06),
+                GridDistortion(num_steps=5, distort_limit=0.3),
+            ], p=1.0),
+            ShiftScaleRotate(shift_limit=float(self.default_height / 4 / self.default_height),
+                             scale_limit=0.25,
+                             rotate_limit=45,
+                             interpolation=cv2.INTER_LINEAR,
+                             border_mode=cv2.BORDER_CONSTANT,
+                             value=0.,
+                             always_apply=False,
+                             p=1.0),
+        ], p=1)
+
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
 
         self.view_pos_lut = {'AP': 0,
                              'PA': 1}
-        self.age_converter = lambda x: float(x) / 100
+
         self.sex_lut = {'M': 0,
                         'F': 1}
 
@@ -203,7 +256,7 @@ class SIIMDataset(torch.utils.data.Dataset):
         return max(self.width)
 
     def augment_image_and_mask(self, image, mask):
-        augmented = self.augmentations(image=image, mask=mask)
+        augmented = self.augmentations_medium(image=image, mask=mask)
         return augmented['image'], augmented['mask']
 
     def resize_th_3d_image(self, image, new_size):
@@ -216,16 +269,16 @@ class SIIMDataset(torch.utils.data.Dataset):
 if __name__ == '__main__':
     import cv2
 
-    # train_dataset = SIIMDataset('data/dicom-images-train', 'data/train-rle.csv',
-    #                             hw_size=[[1024], [1024]], augment=True)
-    train_dataset = SIIMDataset('data/dicom-images-test', 'logs/65-Folds-Adam-b4-CustomUResNet34-BN-MaskOHEMBCEDice-ClassOHEMBCE-FullData-Res1024-Aug/submission.csv',
-                                hw_size=[[1024], [1024]], augment=False)
+    train_dataset = SIIMDataset('data/dicom-images-train', 'data/train-rle.csv',
+                                hw_size=[[1024], [1024]], augment=True)
+    # train_dataset = SIIMDataset('data/dicom-images-test', 'logs/65-Folds-Adam-b4-CustomUResNet34-BN-MaskOHEMBCEDice-ClassOHEMBCE-FullData-Res1024-Aug/submission.csv',
+    #                             hw_size=[[1024], [1024]], augment=False)
     # train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=16*4,
     #                                                shuffle=True,
     #                                                num_workers=os.cpu_count())
     # for item in train_dataloader:
     #     print('iteration')
-    #
+
     # exit(0)
 
     pixels_per_class = [0., 0.]

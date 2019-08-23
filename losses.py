@@ -25,8 +25,8 @@ class LossCalculator(nn.Module):
         # self.ohem = LimitedLossOhemCrossEntropyPerExample(max_kept=0.02) # 0.02
         # self.ohem = LimitedLossOhemCrossEntropyPerExample(max_kept=0.3) # 0.02
         self.ohem = LimitedLossOhemCrossEntropy(max_kept=0.5) # 0.3
-        # self.ohem = LimitedLossOhemCrossEntropy(max_kept=0.3)
         self.class_ohem = LimitedLossOhemCrossEntropy(max_kept=0.5)
+        self.mask_boundary_loss = BoundaryF1_Loss(boundary_diameter=3)
 
     def forward(self, preds_dict, targets_dict):
         pred_mask = preds_dict['mask']
@@ -47,8 +47,14 @@ class LossCalculator(nn.Module):
         # mask_dice_loss = torch.zeros_like(mask_ce_loss)
         # mask_dice_loss = lovasz_hinge(pred_mask_logits, target_mask, per_image=True)
         mask_dice_loss = correct_dice_loss(pred_mask, target_mask)
+        # mask_dice_loss = log_dice_loss(pred_mask, target_mask, gamma=0.3)
         mask_dice_loss *= target_class.view((target_class.size(0)))
         mask_dice_loss = mask_dice_loss.sum() / (target_class.sum() + 0.00001)
+
+        mask_boundary_loss = self.mask_boundary_loss(pred_mask, target_mask)
+        mask_boundary_loss *= target_class.view((target_class.size(0)))
+        mask_boundary_loss = mask_boundary_loss.sum() / (target_class.sum() + 0.00001)
+        mask_boundary_loss *= 0
 
         # class_ce_loss = F.binary_cross_entropy(pred_class, target_class, reduction='none')
         # class_ce_loss = class_ce_loss.mean(dim=(1))
@@ -56,10 +62,20 @@ class LossCalculator(nn.Module):
 
         # mask_ce_loss = torch.zeros_like(class_ce_loss)
 
-        total_loss = mask_ce_loss + mask_dice_loss + class_ce_loss
-        return {'mask_ce': mask_ce_loss, 'mask_dice': mask_dice_loss, 'mask_total': mask_ce_loss + mask_dice_loss,
+        total_loss = mask_ce_loss \
+                     + mask_dice_loss \
+                     + class_ce_loss \
+                     + mask_boundary_loss
+
+        return {'mask_ce': mask_ce_loss, 'mask_dice': mask_dice_loss,
+                'mask_boundary': mask_boundary_loss, 'mask_total': mask_ce_loss + mask_dice_loss + mask_boundary_loss,
                 'class_ce': class_ce_loss, 'class_total': class_ce_loss,
                 'total': total_loss}
+
+def hard_target_to_soft(target, positive_target_value=0.9):
+    soft_target = target * positive_target_value
+    soft_target += (1 - target) * (1 - positive_target_value)
+    return soft_target
 
 
 class OhemCrossEntropy(nn.Module):
@@ -67,24 +83,24 @@ class OhemCrossEntropy(nn.Module):
         super(OhemCrossEntropy, self).__init__()
         self.thresh = thresh
         self.min_kept = max(0.001, min_kept)
-        self.criterion = nn.BCELoss(weight=weight, reduction='none')
+        self.criterion = nn.BCEWithLogitsLoss(weight=weight, reduction='none')
 
-    def forward(self, pred, target, **kwargs):
+    def forward(self, pred, target):
         ph, pw = pred.size(2), pred.size(3)
         h, w = target.size(2), target.size(3)
         if ph != h or pw != w:
             pred = F.upsample(input=pred, size=(h, w), mode='bilinear')
-        pixel_losses = self.criterion(pred, target).contiguous().view(-1)
-        tmp_target = target.clone().to(torch.long)
+        pixel_losses = self.criterion(pred, target).contiguous()
         # pred = pred.gather(1, tmp_target)
-        pred, ind = pred.contiguous().view(-1, ).contiguous().sort()
+        pred_flat, ind = pred.contiguous().view(-1, ).contiguous().sort()
         min_kept = int(self.min_kept * (pred.numel() - 1))
-        min_value = pred[min(min_kept, pred.numel() - 1)]
+        min_value = pred_flat[min(min_kept, pred.numel() - 1)]
         threshold = max(min_value, self.thresh)
 
-        pixel_losses = pixel_losses[ind]
-        pixel_losses = pixel_losses[pred < threshold]
-        return pixel_losses.mean()
+        hard_mask = (pred < threshold).type(pred.type())
+        pixel_losses = pixel_losses * hard_mask
+        pixel_losses = pixel_losses.sum(dim=(1, 2, 3)) / hard_mask.sum(dim=(1, 2, 3))
+        return pixel_losses
 
 class LimitedOhemCrossEntropy(nn.Module):
     def __init__(self, max_kept=0.001, weight=None):
@@ -250,6 +266,14 @@ def correct_dice_loss(input, target):
 
     return 1 - ((2. * intersection + smooth) / (cardinality + smooth))
 
+def log_dice_loss(input, target, gamma=1.0):
+    smooth = 1.
+
+    intersection = (input * target).sum(dim=(1, 2, 3))
+    cardinality = (input + target).sum(dim=(1, 2, 3))
+
+    return torch.pow(-torch.log(((2. * intersection + smooth) / (cardinality + smooth))), exponent=gamma)
+
 
 def siim_dice_metric(input, target):
     has_mask = (target.sum(dim=(1, 2, 3)) != 0).type(dtype=target.type(), non_blocking=False)
@@ -314,3 +338,38 @@ class TotalLoss(nn.Module):
 
         loss_dict['total'] = sum(loss for loss in loss_dict.values())
         return loss_dict
+
+class BoundaryF1(nn.Module):
+
+    def __init__(self, boundary_diameter):
+        super(BoundaryF1, self).__init__()
+        self.boundary_diameter = boundary_diameter
+        self.maxpool = nn.MaxPool2d(kernel_size=self.boundary_diameter, stride=1, padding=(int(boundary_diameter) - 1) // 2)
+
+    def forward(self, prob, target):
+        # Equation 1
+        inv_gt = 1 - target
+        y_b_gt = self.maxpool(inv_gt) - inv_gt
+        inv_pd = 1 - prob
+        y_b_pd = self.maxpool(inv_pd) - inv_pd
+
+        # Equation 2
+        y_b_ext_gt = self.maxpool(target)
+        y_b_ext_pd = self.maxpool(prob)
+
+        # Equation 3
+        p_c = ((y_b_pd * y_b_ext_gt).sum(dim=(1, 2, 3)) + 1) / (y_b_pd.sum(dim=(1, 2, 3)) + 1.)
+        r_c = ((y_b_gt * y_b_ext_pd).sum(dim=(1, 2, 3)) + 1) / (y_b_gt.sum(dim=(1, 2, 3)) + 1.)
+
+
+        # Equation 4
+        bf1_c = (2 * p_c * r_c + 1) / (p_c + r_c + 1)
+        return bf1_c
+
+class BoundaryF1_Loss(nn.Module):
+    def __init__(self, boundary_diameter):
+        super(BoundaryF1_Loss, self).__init__()
+        self.bf1 = BoundaryF1(boundary_diameter=boundary_diameter)
+
+    def forward(self, pred, target):
+        return 1 - self.bf1(pred, target)

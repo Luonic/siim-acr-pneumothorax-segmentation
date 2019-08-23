@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models
 import hrnet
+# https://github.com/lukemelas/EfficientNet-PyTorch
+import efficientnet_pytorch
 
 
 class ClassifierReductionBlock(nn.Module):
@@ -361,81 +363,272 @@ class UNet(nn.Module):
 #         cat_p = torch.cat([up_p, x_p], dim=1)
 #         return self.bn(F.relu(cat_p))
 
+class Dropout2d(nn.Module):
+    def __init__(self, p):
+        super(Dropout2d, self).__init__()
+        self.p = torch.tensor(1. - p)
+
+    def forward(self, input):
+        if self.training:
+            probs = self.p.view(1, 1, 1, 1)
+            probs = probs.repeat(1, input.size(1), 1, 1)
+            dist = torch.distributions.bernoulli.Bernoulli(probs=probs)
+            dropout_mask = dist.sample().type(input.type())
+            # print(dropout_mask)
+            return input * dropout_mask
+        else:
+            return input
+
+
 class UnetBlock(nn.Module):
-    def __init__(self, up_in, x_in, n_out, norm_layer=None):
+    def __init__(self, up_in, x_in, n_out, norm_layer=None, upsample=False):
+        self.training = False
+        self.dropout_prob = 0.1
         self.up_in = up_in
         self.x_in = x_in
         self.n_out = n_out
         super().__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
+        self.upsample = upsample
         up_out = x_out = n_out // 2
-        self.tr_conv = nn.ConvTranspose2d(up_in, up_out, 2, stride=2)
+        if upsample:
+            self.tr_conv = nn.Conv2d(up_in, up_out, 1)
+        else:
+            self.tr_conv = nn.ConvTranspose2d(up_in, up_out, 2, stride=2)
         self.x_conv = nn.Conv2d(x_in, x_out, 1)
 
         self.norm = norm_layer(n_out)
+        self.cat_dropout = nn.Dropout2d(self.dropout_prob, inplace=False)
 
         self.conv_block_1 = nn.Sequential(
-            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=True),
             norm_layer(n_out),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            # nn.Dropout2d(self.dropout_prob)
         )
 
         self.conv_block_2 = nn.Sequential(
-            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=True),
             norm_layer(n_out),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            # nn.Dropout2d(self.dropout_prob)
         )
 
     def forward(self, up_p, x_p):
         up_p = self.tr_conv(up_p)
+        if self.upsample:
+            up_p = F.interpolate(up_p, (x_p.size(2), x_p.size(3)), mode='nearest')
         x_p = self.x_conv(x_p)
         cat_p = torch.cat([up_p, x_p], dim=1)
         cat_p = self.norm(cat_p)
         cat_p = F.relu(cat_p, inplace=True)
+        cat_p = self.cat_dropout(cat_p)
 
         out = self.conv_block_1(cat_p)
         out = self.conv_block_2(out)
         return out
 
+class ResidualUnetBlock(nn.Module):
+    def __init__(self, up_in, x_in, n_out, norm_layer=None, upsample=False):
+        self.training = False
+        self.dropout_prob = 0.1
+        self.up_in = up_in
+        self.x_in = x_in
+        self.n_out = n_out
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self.upsample = upsample
+        up_out = x_out = n_out // 2
+        if upsample:
+            self.tr_conv = nn.Conv2d(up_in, up_out, 1)
+        else:
+            self.tr_conv = nn.ConvTranspose2d(up_in, up_out, 2, stride=2)
+        self.x_conv = nn.Conv2d(x_in, x_out, 1)
+
+        self.norm = norm_layer(n_out)
+        self.cat_dropout = nn.Dropout2d(self.dropout_prob, inplace=False)
+
+        self.conv_block_1 = nn.Sequential(
+            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=True),
+            norm_layer(n_out),
+            nn.ReLU(inplace=True),
+            # nn.Dropout2d(self.dropout_prob)
+        )
+
+        self.conv_block_2 = nn.Sequential(
+            nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=True),
+            norm_layer(n_out),
+            # nn.Dropout2d(self.dropout_prob)
+        )
+
+    def forward(self, up_p, x_p):
+
+        up_p = self.tr_conv(up_p)
+        if self.upsample:
+            up_p = F.interpolate(up_p, (x_p.size(2), x_p.size(3)), mode='nearest')
+        x_p = self.x_conv(x_p)
+        cat_p = torch.cat([up_p, x_p], dim=1)
+        identity = cat_p = self.norm(cat_p)
+        cat_p = F.relu(cat_p, inplace=True)
+        cat_p = self.cat_dropout(cat_p)
+
+        out = self.conv_block_1(cat_p)
+        out = self.conv_block_2(out)
+        out = identity + out
+        out = F.relu(out)
+        return out
+
 
 class ResNetUNet(nn.Module):
-
-    # def __init__(self, n_classes):
-    #     super(ResNetUNet, self).__init__()
-    #     bilinear_upsample = True
-    #     # norm_layer = nn.BatchNorm2d
-    #     # norm_layer = lambda in_planes: nn.GroupNorm(32, in_planes)
-    #     norm_layer = None
-    #     self.backbone = torchvision.models.resnet18(zero_init_residual=True, pretrained=True, norm_layer=norm_layer)
-    #     norm_layer = nn.BatchNorm2d
-    #     # norm_layer = lambda in_planes: nn.GroupNorm(32, in_planes)
-    #     self.up4 = up(512, 256, 256, norm_layer=norm_layer, bilinear=bilinear_upsample)
-    #     self.up3 = up(256, 128, 128, norm_layer=norm_layer, bilinear=bilinear_upsample)
-    #     self.up2 = up(128, 64, 64, norm_layer=norm_layer, bilinear=bilinear_upsample)
-    #     # self.up1 = up(64, 32, bilinear=bilinear_upsample)
-    #     self.outc = outconv(64, n_classes)
-    #     self.ada_mp = nn.AdaptiveMaxPool2d((1, 1))
-    #     self.cls_conv = nn.Conv2d(512, n_classes, 1)
-    #     self.sigmoid = nn.Sigmoid()
-
-    def __init__(self, n_classes):
+    def __init__(self, n_classes, upsample=False):
         super(ResNetUNet, self).__init__()
-        self.backbone = torchvision.models.resnet34(zero_init_residual=True, pretrained=True)
-        self.up1 = UnetBlock(512, 256, 256)
-        self.up2 = UnetBlock(256, 128, 128)
-        self.up3 = UnetBlock(128, 64, 64)
-        self.up4 = UnetBlock(64, 64, 64)
-        self.up5 = nn.Sequential(nn.ConvTranspose2d(64, 32, 4, stride=2, bias=False),
-                                 nn.BatchNorm2d(32),
-                                 nn.ReLU())
+        # norm_layer = lambda in_channels: nn.GroupNorm(8, in_channels) # for now 8 is best
+        norm_layer = None
+        self.backbone = torchvision.models.resnet34(zero_init_residual=True, pretrained=True, norm_layer=norm_layer)
+        self.up1 = UnetBlock(512, 256, 256, upsample=upsample, norm_layer=norm_layer)
+        self.up2 = UnetBlock(256, 128, 128, upsample=upsample, norm_layer=norm_layer)
+        self.up3 = UnetBlock(128, 64, 64, upsample=upsample, norm_layer=norm_layer)
+        self.up4 = UnetBlock(64, 64, 64, upsample=upsample, norm_layer=norm_layer)
+        # self.up5 = nn.Sequential(
+        #     nn.ConvTranspose2d(64, 32, 4, stride=2, bias=True),
+        #     nn.BatchNorm2d(32),
+        #     nn.ReLU(),
+        #     nn.Conv2d(32, n_classes, 3)
+        # )
+        self.up5 = nn.Sequential(
+            nn.Dropout2d(p=0.2),
+            nn.Conv2d(64, n_classes, 3)
+        )
 
-        self.outc = nn.Conv2d(32, n_classes, 3)
         self.ada_p = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Sequential(nn.Conv2d(512, 256, 1),
-                                        nn.BatchNorm2d(256),
-                                        nn.ReLU(inplace=False),
-                                        nn.Conv2d(256, n_classes, 1))
+        self.classifier = nn.Sequential(
+            nn.Dropout2d(p=0.4),
+            nn.Conv2d(512, n_classes, 1))
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, inp):
+        x = conv1 = self.backbone.conv1(inp)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
+        x = x1 = self.backbone.layer1(x)
+        x = x2 = self.backbone.layer2(x)
+        x = x3 = self.backbone.layer3(x)
+        x = x4 = self.backbone.layer4(x)
+
+        # x1 = F.relu(x1)
+        # x2 = F.relu(x2)
+        # x3 = F.relu(x3)
+        # x4 = F.relu(x4)
+
+        x = self.up1(x4, x3)
+        x = self.up2(x, x2)
+        x = self.up3(x, x1)
+        x = self.up4(x, conv1)
+        x = self.up5(x)
+
+        mask_logits = F.interpolate(x, (inp.shape[2], inp.shape[3]), mode='bilinear')
+        mask_probs = self.sigmoid(mask_logits)
+
+        cls = self.ada_p(x4)
+        cls_logits = self.classifier(cls)
+        cls_logits = cls_logits.view((-1, 1))
+        cls_probs = torch.sigmoid(cls_logits)
+
+        out = {'mask': mask_probs, 'mask_logits': mask_logits,
+               'class': cls_probs, 'class_logits': cls_logits}
+        return out
+
+
+class UNetPlusPlus(nn.Module):
+    class UnetPlusPlusBlock(nn.Module):
+        def __init__(self, up_in, x_in, norm_layer=None):
+            self.dropout_prob = 0.5
+            self.up_in = up_in
+            self.x_in = x_in
+            self.n_out = x_in
+            super().__init__()
+            if norm_layer is None:
+                norm_layer = nn.BatchNorm2d
+            up_out = x_out = self.n_out // 2
+            self.tr_conv = nn.ConvTranspose2d(up_in, up_out, 2, stride=2)
+            self.x_conv = nn.Conv2d(x_in, x_out, 1)
+            self.norm = norm_layer(self.n_out)
+
+            self.conv_block_1 = nn.Sequential(
+                nn.Conv2d(self.n_out, self.n_out, kernel_size=3, padding=1, bias=False),
+                norm_layer(self.n_out),
+                nn.ReLU(inplace=True),
+            )
+
+            self.conv_block_2 = nn.Sequential(
+                nn.Conv2d(self.n_out, self.n_out, kernel_size=3, padding=1, bias=False),
+                norm_layer(self.n_out),
+                nn.ReLU(inplace=True),
+            )
+
+        def forward(self, up_p, x_p):
+            up_p = self.tr_conv(up_p)
+            x_p = self.x_conv(x_p)
+            cat_p = torch.cat([up_p, x_p], dim=1)
+            cat_p = self.norm(cat_p)
+            cat_p = F.relu(cat_p, inplace=True)
+
+            out = self.conv_block_1(cat_p)
+            out = self.conv_block_2(out)
+            return out
+
+    def __init__(self, num_classes, num_backbone_channels, norm_layer=None):
+        super(UNetPlusPlus, self).__init__()
+        self.num_backbone_channels = num_backbone_channels
+        self.stages = []
+        for stage_idx in range(1, len(num_backbone_channels)):
+            stage = []
+            for resolution_idx in range(1, len(num_backbone_channels) - (stage_idx - 1)):
+                stage.append(self.UnetPlusPlusBlock(
+                    x_in=num_backbone_channels[resolution_idx - 1],
+                    up_in=num_backbone_channels[resolution_idx]
+                ))
+            self.stages.append(stage)
+
+        self.classifier = nn.Conv2d(in_channels=self.num_backbone_channels[0], out_channels=num_classes, kernel_size=1)
+
+    def forward(self, inputs):
+        # Inputs - iterable of different resolution featuremaps
+        stages_featuremaps = [inputs]
+        for stage_idx in range(1, len(self.num_backbone_channels)):
+            stage_featuremaps = []
+            for resolution_idx in range(1, len(self.num_backbone_channels) - (stage_idx - 1)):
+                x_in = stages_featuremaps[stage_idx - 1][resolution_idx - 1]
+                up_in = stages_featuremaps[stage_idx - 1][resolution_idx]
+                stage_featuremaps.append(self.stages[stage_idx - 1][resolution_idx - 1](up_in, x_in))
+            stages_featuremaps.append(stage_featuremaps)
+
+        mask_levels = [stage_featuremaps[0] for stage_featuremaps in stages_featuremaps]
+
+        return mask_levels
+
+
+class ResNetUNetPlusPlus(nn.Module):
+    def __init__(self, n_classes):
+        super(ResNetUNetPlusPlus, self).__init__()
+        self.backbone = torchvision.models.resnet34(zero_init_residual=True, pretrained=True)
+        self.unetplusplus = UNetPlusPlus(num_classes=n_classes, num_backbone_channels=(64, 64, 128, 256, 512))
+
+        self.upsample_and_classify = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, 4, stride=2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # nn.Dropout2d(p=0.1),
+            nn.Conv2d(32, n_classes, 3)
+        )
+
+        self.ada_p = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            # nn.Dropout2d(p=0.5),
+            nn.Conv2d(512, n_classes, 1))
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, inp):
@@ -453,18 +646,94 @@ class ResNetUNet(nn.Module):
         x3 = F.relu(x3)
         x4 = F.relu(x4)
 
-        x = self.up1(x4, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-        x = self.up4(x, conv1)
+        cls = self.ada_p(x4)
+        cls_logits = self.classifier(cls)
+        cls_logits = cls_logits.view((-1, 1))
+        cls_probs = torch.sigmoid(cls_logits)
+
+        mask_levels = self.unetplusplus((conv1, x1, x2, x3, x4))
+        mask_levels = [self.upsample_and_classify(mask_level) for mask_level in mask_levels]
+
+        avg_mask = [torch.unsqueeze(mask_level, dim=0) for mask_level in mask_levels]
+        avg_mask = torch.cat(avg_mask, dim=0)
+        mask_logits = avg_mask.mean(dim=0, keepdim=False)
+        mask_logits = F.interpolate(mask_logits, (inp.shape[2], inp.shape[3]), mode='bilinear')
+        mask_probs = self.sigmoid(mask_logits)
+        out = {'mask': mask_probs, 'mask_logits': mask_logits, 'mask_levels_logits': mask_levels,
+               'class': cls_probs, 'class_logits': cls_logits}
+        return out
+
+
+class EfficientUNet(nn.Module):
+    def __init__(self, n_classes):
+        super(EfficientUNet, self).__init__()
+        self.backbone = efficientnet_pytorch.EfficientNet.from_pretrained('efficientnet-b0')
+        # b7
+        # self.feature_idxs = [(4, 32),  # / 2
+        #                      (11, 48),  # / 4
+        #                      (18, 80),  # / 8
+        #                      (38, 224),  # / 16
+        #                      (55, 640)]  # / 32
+
+        # b5
+        # self.feature_idxs = [(3, 24),  # / 2
+        #                      (8, 40),  # / 4
+        #                      (13, 64),  # / 8
+        #                      (27, 176),  # / 16
+        #                      (39, 512)]  # / 32
+
+        self.feature_idxs = [(1, 16),  # / 2
+                             (3, 24),  # / 4
+                             (5, 40),  # / 8
+                             (11, 112),  # / 16
+                             (16, 320)]  # / 32
+
+        self.up1 = UnetBlock(320, 112, 112)
+        self.up2 = UnetBlock(112, 40, 40)
+        self.up3 = UnetBlock(40, 24, 24)
+        self.up4 = UnetBlock(24, 16, 16)
+        self.up5 = nn.Sequential(nn.ConvTranspose2d(16, 16, 4, stride=2, bias=False),
+                                 nn.BatchNorm2d(16),
+                                 nn.ReLU(),
+                                 nn.Conv2d(16, n_classes, 3))
+
+        self.ada_p = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Conv2d(320, n_classes, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, inp):
+        features = []
+        # Stem
+        x = F.relu(self.backbone._bn0(self.backbone._conv_stem(inp)))
+        features.append(x)
+
+        # Blocks
+        for idx, block in enumerate(self.backbone._blocks):
+            drop_connect_rate = self.backbone._global_params.drop_connect_rate
+            if drop_connect_rate:
+                drop_connect_rate *= float(idx) / len(self.backbone._blocks)
+            x = block(x, drop_connect_rate=drop_connect_rate)
+            features.append(x)
+
+        # for i, tensor in enumerate(features):
+        #     print(i, tensor.shape)
+
+        x1 = F.relu(features[self.feature_idxs[0][0]])
+        x2 = F.relu(features[self.feature_idxs[1][0]])
+        x3 = F.relu(features[self.feature_idxs[2][0]])
+        x4 = F.relu(features[self.feature_idxs[3][0]])
+        x5 = F.relu(features[self.feature_idxs[4][0]])
+
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
         x = self.up5(x)
 
-        # x = self.up1(x1, x1)
-        x = self.outc(x)
         mask_logits = F.interpolate(x, (inp.shape[2], inp.shape[3]), mode='bilinear')
         mask_probs = self.sigmoid(mask_logits)
 
-        cls = self.ada_p(x4)
+        cls = self.ada_p(x5)
         cls_logits = self.classifier(cls)
         cls_logits = cls_logits.view((-1, 1))
         cls_probs = torch.sigmoid(cls_logits)
