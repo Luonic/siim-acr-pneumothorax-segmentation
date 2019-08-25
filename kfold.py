@@ -28,7 +28,10 @@ class KFold():
             checkpoints = glob(os.path.join(fold, '*.pth.tar'))
             for checkpoint in checkpoints:
                 filename = os.path.split(checkpoint)[-1]
-                epoch_num = int(filename.split('=')[1].split('.')[0])
+                try:
+                    epoch_num = int(filename.split('=')[1].split('.')[0])
+                except IndexError:
+                    continue
                 epochs_in_folds[fold].add(epoch_num)
 
         if len(epochs_in_folds) == 0:

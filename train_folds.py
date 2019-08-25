@@ -13,6 +13,7 @@ import validate
 from train import train_one_epoch
 import samplers
 import radam
+import torchcontrib
 
 
 def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sampler, epoch, epochs_to_train):
@@ -74,6 +75,7 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
     # optim = torch.optim.Adam(params=trainable_params, lr=max_lr)
     # optim = torch.optim.AdamW(params=trainable_params, lr=base_lr, weight_decay=0.00001)
     optim = radam.RAdam(params=trainable_params, lr=base_lr, weight_decay=0.0001)
+    optim = torchcontrib.optim.SWA(optim)
     # optim = torch.optim.SGD(params=trainable_params,
     #                         momentum=0.98,
     #                         nesterov=True,
@@ -108,7 +110,7 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
     # model, optimizer = amp.initialize(model, optim, opt_level='O0')
 
     writer = SummaryWriter(work_dir)
-    for i in range(epochs_to_train_per_run):
+    for i in range(epochs_to_train):
         train_result_dict = train_one_epoch(model=model, optimizer=optim, data_loader=train_dataloader, device=device,
                                             epoch=epoch, lr_scheduler=lr_scheduler, summary_writer=writer, print_freq=100)
 
@@ -127,13 +129,33 @@ def train_fold(fold_idx, work_dir, train_filenames, test_filenames, batch_sample
                     'mask_threshold': val_result_dict['best_mask_score'][0],
                     'class_accuracy': val_result_dict['best_class_score'][1],
                     'class_thresold': val_result_dict['best_class_score'][0]}
+        if (epoch + 1) % epochs_per_cycle == 0 and epoch != 0:
+            print('Updating SWA running average')
+            optim.update_swa()
         epoch += 1
+        break
 
     # if mask_score > best_metric:
     #     best_metric = mask_score
         # if epoch % epochs_per_cycle == 0:
     fold_logger.log_epoch(epoch - 1, log_data)
-    utils.save_checkpoint(output_dir=work_dir, epoch=epoch, model=model, optimizer=optim, best_metric=best_metric)
+    utils.save_checkpoint(output_dir=work_dir, epoch=epoch - 1, model=model, optimizer=optim, best_metric=best_metric)
+
+    if (epoch) % epochs_per_cycle == 0 and epoch != 0:
+        optim.swap_swa_sgd()
+        print('Swapped SWA buffers')
+        print('Updating BatchNorm statistics...')
+        optim.bn_update(utils.dataloader_image_extract_wrapper(train_dataloader), model, device)
+        print('Updated BatchNorm statistics')
+        print('Validating SWA model...')
+        val_result_dict = validate.validate(model, val_dataloader, device)
+        log_data = {'score': val_result_dict['best_mask_score'][1],
+                    'mask_threshold': val_result_dict['best_mask_score'][0],
+                    'class_accuracy': val_result_dict['best_class_score'][1],
+                    'class_thresold': val_result_dict['best_class_score'][0]}
+        fold_logger.log_epoch('swa', log_data)
+        print('Saved SWA model')
+        utils.save_checkpoint(output_dir=work_dir, epoch=None, name='swa', model=model, optimizer=optim, best_metric=best_metric)
 
     return {'mask_score': mask_score,
             'class_score': class_score,
@@ -146,7 +168,7 @@ if __name__ == '__main__':
     utils.set_cudnn_perf_param()
     # TODO: Train on 768x768 random crops of 1024x1024 to be able to capture pneumo features for classification
     # TODO: Finetune decoder for pretrained model a few epochs
-    output_dir = 'logs/boundary_loss_test'
+    output_dir = 'logs/RAdam-b16-Intepolation-Dice'
     os.makedirs(output_dir, exist_ok=True)
     folds = kfold.KFold('data/folds.json')
     writer = SummaryWriter(output_dir)

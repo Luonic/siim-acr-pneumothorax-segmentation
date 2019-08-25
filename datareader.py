@@ -256,7 +256,7 @@ class SIIMDataset(torch.utils.data.Dataset):
         return max(self.width)
 
     def augment_image_and_mask(self, image, mask):
-        augmented = self.augmentations_medium(image=image, mask=mask)
+        augmented = self.augmentations(image=image, mask=mask)
         return augmented['image'], augmented['mask']
 
     def resize_th_3d_image(self, image, new_size):

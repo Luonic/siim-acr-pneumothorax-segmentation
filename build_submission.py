@@ -39,6 +39,7 @@ def TestTimeAugmentationPrediction(model, image, mask_thresh, class_thresh):
     predictions = []
     predictions.append(predict_and_binarize(model, image, mask_thresh, class_thresh))
     predictions.append(tta_horizontal_flip(model, image, mask_thresh, class_thresh))
+    return predictions
 
 
 
@@ -70,7 +71,7 @@ class SubmissionWriter():
 
 
 if __name__ == '__main__':
-    output_dir = 'logs/RAdam-b16-Intepolation-LogDicePow03-BoundaryLoss/'
+    output_dir = 'logs/RAdam-b16-Intepolation-Dice'
     folds = kfold.KFold('data/folds.json')
     # thresholds = load_thresholds()
     models_list = []
@@ -90,6 +91,7 @@ if __name__ == '__main__':
         model = model.to(device)
 
         best_epoch, best_epoch_data = fold_logger.get_best_epoch()
+        print('best epoch:', best_epoch)
         utils.load_checkpoint_exact_epoch(best_epoch, fold_dir, model, device, optimizer=None)
         model.eval()
 
@@ -101,7 +103,7 @@ if __name__ == '__main__':
     test_dataset = datareader.SIIMDataset('data/dicom-images-test', None, hw_size=([img_size], [img_size]))
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=os.cpu_count())
 
-    dst_submission_path = os.path.join(output_dir, 'submission_cumprod.csv')
+    dst_submission_path = os.path.join(output_dir, 'submission.csv')
     sub_writer = SubmissionWriter(dst_submission_path)
 
     mean_class_threshold = torch.from_numpy(
@@ -130,6 +132,7 @@ if __name__ == '__main__':
                 pred_class = preds_dict['class']
                 predictions.append(pred_mask)
                 classes.append(pred_class)
+
 
             predictions = torch.cat(predictions, dim=1)
             predictions, indices = torch.median(predictions, dim=1, keepdim=True)

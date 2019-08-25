@@ -91,20 +91,23 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler=N
             new_lr = lr_scheduler.get_new_lr()
             lr_utils.set_lr(optimizer, new_lr)
 
-        optimizer.zero_grad()
+        if optimizer is not None:
+            optimizer.zero_grad()
 
         torch.mean(loss).backward()
         # # loss.backward() changed to:
         # with amp.scale_loss(loss, optimizer) as scaled_loss:
         #     scaled_loss.backward()
 
-
-        optimizer.step()
+        if optimizer is not None:
+            optimizer.step()
 
         if lr_scheduler is not None:
             lr_scheduler.step()
 
-        lr = lr_utils.get_lr(optimizer)
+        if optimizer is not None:
+            lr = lr_utils.get_lr(optimizer)
+
         if i % print_freq == 0:
             print('loss', torch.mean(loss).item(), 'lr', lr)
 
@@ -146,9 +149,8 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler=N
             #     summary_writer.add_histogram(tag, value, global_step=global_step)
             #     summary_writer.add_histogram(tag + '/grad', value.grad, global_step=global_step)
 
-
-
-    optimizer.zero_grad()
+    if optimizer is not None:
+        optimizer.zero_grad()
     mean_epoch_loss = epoch_loss / i
     return {'loss': mean_epoch_loss}
 

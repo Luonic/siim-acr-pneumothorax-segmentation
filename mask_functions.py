@@ -8,6 +8,8 @@ def mask2rle(img, width, height):
     runStart = -1
     runLength = 0
 
+    img = img.detach().cpu().numpy()
+
 
     for y in range(height):
         for x in range(width):
